@@ -37,6 +37,9 @@ def send_behavior_email(
 """
     )
 
-    with smtplib.SMTP_SSL("smtp.yandex.ru", 465) as smtp:
+    with smtplib.SMTP("smtp.yandex.ru", 587, timeout=10) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
         smtp.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD"))
         smtp.send_message(email)

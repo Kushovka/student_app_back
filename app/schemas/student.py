@@ -16,6 +16,7 @@ class StudentCreate(StudentBase):
 
 class StudentOut(StudentBase):
     id: str
+    school_id: str
 
     class Config:
         from_attributes = True

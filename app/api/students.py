@@ -5,8 +5,10 @@ from pydantic import BaseModel
 from sqlalchemy import asc
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.db.deps import get_db
 from app.models.student import Student
+from app.models.user import User
 from app.schemas.student import StudentCreate, StudentOut
 
 router = APIRouter(prefix="/student", tags=["Students"])
@@ -22,8 +24,12 @@ def get_students(
     grade: Optional[int] = None,
     class_letter: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    query = db.query(Student)
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+
+    query = db.query(Student).filter(Student.school_id == current_user.school_id)
 
     if grade is not None:
         query = query.filter(Student.grade == grade)
@@ -37,17 +43,35 @@ def get_students(
 
 
 @router.get("/{student_id}", response_model=StudentOut)
-def get_student_by_id(student_id: str, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.id == student_id).first()
+def get_student_by_id(
+    student_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+
+    student = (
+        db.query(Student)
+        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .first()
+    )
 
     if not student:
-        raise HTTPException(status_code=404, detail="Student is noy found")
+        raise HTTPException(status_code=404, detail="Student not found")
 
     return student
 
 
 @router.post("/", response_model=StudentOut)
-def create_students(data: StudentCreate, db: Session = Depends(get_db)):
+def create_students(
+    data: StudentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+
     student = Student(
         first_name=data.first_name,
         last_name=data.last_name,
@@ -55,6 +79,7 @@ def create_students(data: StudentCreate, db: Session = Depends(get_db)):
         email=data.email,
         grade=data.grade,
         class_letter=data.class_letter.strip().upper(),
+        school_id=current_user.school_id,
     )
     db.add(student)
     db.commit()
@@ -63,8 +88,19 @@ def create_students(data: StudentCreate, db: Session = Depends(get_db)):
 
 
 @router.delete("/{student_id}", status_code=204)
-def delete_student(student_id: str, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.id == student_id).first()
+def delete_student(
+    student_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+
+    student = (
+        db.query(Student)
+        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .first()
+    )
 
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")

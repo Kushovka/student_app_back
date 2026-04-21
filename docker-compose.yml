@@ -2,6 +2,7 @@ services:
   db:
     image: postgres:16
     container_name: student_db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: kirill
       POSTGRES_PASSWORD: kirill
@@ -10,12 +11,19 @@ services:
       - "5433:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kirill -d student_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   api:
     build: .
     container_name: student_api
+    restart: unless-stopped
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -24,13 +32,15 @@ services:
       POSTGRES_DB: student_db
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
+      BACKEND_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000
+
     ports:
       - "8001:8000"
     command: >
+      sh -c "alembic upgrade head &&
       uvicorn app.main:app
       --host 0.0.0.0
-      --port 8000
-      --reload
+      --port 8000"
 
 volumes:
   pg_data:

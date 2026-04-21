@@ -3,10 +3,15 @@ import smtplib
 from email.message import EmailMessage
 
 from app.models.student import Student
+from app.models.user import User
 
 
 def send_behavior_email(
-    student: Student, subject: str, reasons: list[str], comment: str | None
+    student: Student,
+    teacher: User,
+    subject: str,
+    reasons: list[str],
+    comment: str | None,
 ):
     email = EmailMessage()
     email["From"] = os.getenv("SMTP_USER")
@@ -18,6 +23,12 @@ def send_behavior_email(
     comment_block = ""
     if comment:
         comment_block = f"\nКомментарий:\n{comment}\n"
+
+    teacher_name = " ".join(
+        part
+        for part in (teacher.last_name, teacher.first_name, teacher.middle_name)
+        if part
+    )
 
     email.set_content(
         f"""
@@ -33,7 +44,7 @@ def send_behavior_email(
 {comment_block}
 
 С уважением,
-Учитель
+{teacher_name}
 """
     )
 

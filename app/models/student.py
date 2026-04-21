@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -16,7 +16,9 @@ class Student(Base):
     email = Column(String, nullable=False)
     grade = Column(Integer, nullable=False)
     class_letter = Column(String(1), nullable=False)
+    school_id = Column(String, ForeignKey("schools.id"), nullable=False)
 
     behavior_records = relationship(
         "BehaviorRecord", backref="student", cascade="all, delete"
     )
+    school = relationship("School", back_populates="students")

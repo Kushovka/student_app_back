@@ -2,6 +2,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import joinedload
 
 from app.core.security import ALGORITHM, SECRET_KEY
 from app.db.deps import get_db
@@ -29,7 +30,12 @@ def get_current_user(
     except JWTError:
         raise credentials_exception
 
-    user = db.query(User).filter(User.id == user_id).first()
+    user = (
+        db.query(User)
+        .options(joinedload(User.school))
+        .filter(User.id == user_id)
+        .first()
+    )
     if user is None:
         raise credentials_exception
 

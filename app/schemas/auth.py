@@ -1,5 +1,7 @@
 from pydantic import BaseModel, EmailStr
 
+from app.schemas.school import SchoolOut
+
 
 class UserCreate(BaseModel):
     first_name: str
@@ -21,7 +23,9 @@ class UserOut(BaseModel):
     last_name: str
     middle_name: str
     email: EmailStr
+    role: str
     school_id: str | None = None
+    school: SchoolOut | None = None
 
     class Config:
         from_attributes = True

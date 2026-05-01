@@ -20,3 +20,11 @@ class StudentOut(StudentBase):
 
     class Config:
         from_attributes = True
+
+
+class StudentListResponse(BaseModel):
+    items: list[StudentOut]
+    total: int
+    page: int
+    limit: int
+    pages: int

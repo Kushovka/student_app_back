@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, ForeignKey, String
+from sqlalchemy import Boolean, Column, ForeignKey, String
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -16,6 +16,7 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     role = Column(String, nullable=False, default="teacher")
+    is_blocked = Column(Boolean, nullable=False, default=False)
     school_id = Column(String, ForeignKey("schools.id"), nullable=True)
 
     school = relationship("School", back_populates="users")

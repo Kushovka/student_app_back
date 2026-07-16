@@ -1,7 +1,12 @@
+import csv
+from io import BytesIO, StringIO
 from typing import Optional
+
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import and_, or_
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import asc
 from sqlalchemy.orm import Session
@@ -10,7 +15,12 @@ from app.api.deps import get_current_user
 from app.db.deps import get_db
 from app.models.student import Student
 from app.models.user import User
-from app.schemas.student import StudentCreate, StudentListResponse, StudentOut
+from app.schemas.student import (
+    StudentCreate,
+    StudentListResponse,
+    StudentOut,
+    StudentUpdate,
+)
 
 router = APIRouter(prefix="/student", tags=["Students"])
 
@@ -18,6 +28,34 @@ router = APIRouter(prefix="/student", tags=["Students"])
 class NotificationRequests(BaseModel):
     subject: str
     message: str
+
+
+def require_admin(current_user: User) -> None:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def build_class_suffix(grade: int | None, class_letter: str | None) -> str:
+    if not grade or not class_letter:
+        return ""
+    class_letter_map = str.maketrans(
+        {
+            "А": "A",
+            "В": "B",
+            "Е": "E",
+            "К": "K",
+            "М": "M",
+            "Н": "N",
+            "О": "O",
+            "Р": "P",
+            "С": "S",
+            "Т": "T",
+            "У": "Y",
+            "Х": "X",
+        }
+    )
+    letter = class_letter.strip().upper().translate(class_letter_map)
+    return f"_{grade}{letter}"
 
 
 @router.get("/", response_model=StudentListResponse)
@@ -76,6 +114,142 @@ def get_students(
     }
 
 
+@router.get("/export")
+def export_students(
+    grade: Optional[int] = None,
+    class_letter: Optional[str] = None,
+    format: str = Query(default="xlsx", pattern="^(csv|xlsx)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
+
+    query = db.query(Student).filter(Student.school_id == current_user.school_id)
+    if grade is not None:
+        query = query.filter(Student.grade == grade)
+    if class_letter is not None:
+        query = query.filter(Student.class_letter == class_letter.strip().upper())
+
+    students = query.order_by(asc(Student.grade), asc(Student.class_letter), asc(Student.last_name)).all()
+    filename_class = build_class_suffix(grade, class_letter)
+
+    headers = ["last_name", "first_name", "middle_name", "email", "grade", "class_letter"]
+    rows = [
+        [
+            student.last_name,
+            student.first_name,
+            student.middle_name,
+            student.email,
+            student.grade,
+            student.class_letter,
+        ]
+        for student in students
+    ]
+
+    if format == "csv":
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(headers)
+        writer.writerows(rows)
+        return StreamingResponse(
+            iter([output.getvalue().encode("utf-8-sig")]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="students{filename_class}.csv"'
+            },
+        )
+
+    output = BytesIO()
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Ученики"
+    sheet.append(headers)
+    for row in rows:
+        sheet.append(row)
+    for column, width in {"A": 20, "B": 18, "C": 22, "D": 30, "E": 10, "F": 14}.items():
+        sheet.column_dimensions[column].width = width
+    workbook.save(output)
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="students{filename_class}.xlsx"'
+        },
+    )
+
+
+@router.post("/import")
+def import_students(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
+
+    raw = file.file.read()
+    name = (file.filename or "").lower()
+    rows: list[dict[str, str]] = []
+
+    if name.endswith(".csv"):
+        text = raw.decode("utf-8-sig")
+        rows = list(csv.DictReader(StringIO(text)))
+    elif name.endswith(".xlsx"):
+        workbook = load_workbook(BytesIO(raw), read_only=True, data_only=True)
+        sheet = workbook.active
+        values = list(sheet.iter_rows(values_only=True))
+        if values:
+            headers = [str(value).strip() for value in values[0]]
+            for row in values[1:]:
+                rows.append(
+                    {
+                        headers[index]: "" if value is None else str(value).strip()
+                        for index, value in enumerate(row)
+                        if index < len(headers)
+                    }
+                )
+    else:
+        raise HTTPException(status_code=400, detail="Only CSV and XLSX files are supported")
+
+    required = {"last_name", "first_name", "middle_name", "email", "grade", "class_letter"}
+    created = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for index, row in enumerate(rows, start=2):
+        normalized = {str(key).strip(): value for key, value in row.items() if key is not None}
+        if not required.issubset(normalized.keys()):
+            skipped += 1
+            errors.append(f"Row {index}: missing required columns")
+            continue
+
+        try:
+            grade = int(str(normalized["grade"]).strip())
+        except ValueError:
+            skipped += 1
+            errors.append(f"Row {index}: invalid grade")
+            continue
+
+        student = Student(
+            first_name=str(normalized["first_name"]).strip(),
+            last_name=str(normalized["last_name"]).strip(),
+            middle_name=str(normalized["middle_name"]).strip(),
+            email=str(normalized["email"]).strip(),
+            grade=grade,
+            class_letter=str(normalized["class_letter"]).strip().upper()[:1],
+            school_id=current_user.school_id,
+        )
+        db.add(student)
+        created += 1
+
+    db.commit()
+    return {"created": created, "skipped": skipped, "errors": errors[:20]}
+
+
 @router.get("/{student_id}", response_model=StudentOut)
 def get_student_by_id(
     student_id: str,
@@ -97,6 +271,43 @@ def get_student_by_id(
     return student
 
 
+@router.patch("/{student_id}", response_model=StudentOut)
+def update_student(
+    student_id: str,
+    data: StudentUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
+
+    student = (
+        db.query(Student)
+        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .first()
+    )
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    if data.first_name is not None:
+        student.first_name = data.first_name
+    if data.last_name is not None:
+        student.last_name = data.last_name
+    if data.middle_name is not None:
+        student.middle_name = data.middle_name
+    if data.email is not None:
+        student.email = data.email
+    if data.grade is not None:
+        student.grade = data.grade
+    if data.class_letter is not None:
+        student.class_letter = data.class_letter.strip().upper()[:1]
+
+    db.commit()
+    db.refresh(student)
+    return student
+
+
 @router.post("/", response_model=StudentOut)
 def create_students(
     data: StudentCreate,
@@ -105,6 +316,7 @@ def create_students(
 ):
     if not current_user.school_id:
         raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
 
     student = Student(
         first_name=data.first_name,
@@ -129,6 +341,7 @@ def delete_student(
 ):
     if not current_user.school_id:
         raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
 
     student = (
         db.query(Student)

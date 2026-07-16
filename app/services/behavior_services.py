@@ -13,8 +13,13 @@ def send_behavior_email(
     reasons: list[str],
     comment: str | None,
 ):
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    if not smtp_user or not smtp_password:
+        return
+
     email = EmailMessage()
-    email["From"] = os.getenv("SMTP_USER")
+    email["From"] = smtp_user
     email["To"] = student.email
     email["Subject"] = f"Замечание по предмету {subject}"
 
@@ -52,5 +57,46 @@ def send_behavior_email(
         smtp.ehlo()
         smtp.starttls()
         smtp.ehlo()
-        smtp.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD"))
+        smtp.login(smtp_user, smtp_password)
+        smtp.send_message(email)
+
+
+def send_digest_email(student: Student, records) -> None:
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    if not smtp_user or not smtp_password:
+        return
+
+    email = EmailMessage()
+    email["From"] = smtp_user
+    email["To"] = student.email
+    email["Subject"] = "Дайджест замечаний"
+
+    lines = []
+    for record in records:
+        reasons_text = ", ".join(record.reasons or [])
+        lines.append(
+            f"- {record.created_at.strftime('%d.%m.%Y')} | "
+            f"{record.subject} | {record.severity}: {reasons_text}"
+        )
+
+    email.set_content(
+        f"""
+Здравствуйте!
+
+Дайджест замечаний ученика: {student.last_name} {student.first_name}
+Класс: {student.grade}{student.class_letter}
+
+{chr(10).join(lines)}
+
+С уважением,
+Школьный Дисциплинарный Контроль
+"""
+    )
+
+    with smtplib.SMTP("smtp.yandex.ru", 587, timeout=10) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
+        smtp.login(smtp_user, smtp_password)
         smtp.send_message(email)

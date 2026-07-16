@@ -16,6 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from app.core.config import settings
 from app.db.base import Base
 from app.models.behavior_record import BehaviorRecord
+from app.models.notification_queue import NotificationQueue
 from app.models.school import School
 from app.models.student import Student
 from app.models.user import User

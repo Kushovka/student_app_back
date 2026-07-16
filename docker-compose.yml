@@ -42,5 +42,17 @@ services:
       --host 0.0.0.0
       --port 8000"
 
+  frontend:
+    build:
+      context: ../frontend
+    container_name: student_frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      VITE_API_URL: http://localhost:8001
+    ports:
+      - "5173:5173"
+
 volumes:
   pg_data:

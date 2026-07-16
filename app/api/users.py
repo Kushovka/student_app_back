@@ -44,6 +44,7 @@ def get_users(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is not linked to a school",
         )
+    require_admin(current_user)
 
     users = (
         db.query(User)
@@ -70,6 +71,7 @@ def get_user_by_id(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User is not linked to a school",
         )
+    require_admin(current_user)
 
     return get_school_user_or_404(db, current_user, user_id)
 

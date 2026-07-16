@@ -13,6 +13,7 @@ class BehaviorRecord(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     student_id = Column(String, ForeignKey("students.id"), nullable=False)
     school_id = Column(String, ForeignKey("schools.id"), nullable=False)
+    severity = Column(String, nullable=False, default="yellow")
     subject = Column(String, nullable=False)
     reasons = Column(JSON, nullable=False)
     comment = Column(String, nullable=True)

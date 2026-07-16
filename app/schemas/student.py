@@ -14,6 +14,15 @@ class StudentCreate(StudentBase):
     pass
 
 
+class StudentUpdate(BaseModel):
+    first_name: str | None = None
+    last_name: str | None = None
+    middle_name: str | None = None
+    grade: int | None = None
+    class_letter: str | None = None
+    email: str | None = None
+
+
 class StudentOut(StudentBase):
     id: str
     school_id: str

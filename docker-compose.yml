@@ -36,6 +36,8 @@ services:
 
     ports:
       - "8001:8000"
+    volumes:
+      - ./uploads:/app/uploads
     command: >
       sh -c "alembic upgrade head &&
       uvicorn app.main:app

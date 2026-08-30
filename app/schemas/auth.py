@@ -28,6 +28,7 @@ class UserOut(BaseModel):
     role: str
     is_blocked: bool
     school_id: str | None = None
+    max_connected: bool = False
     school: SchoolOut | None = None
 
     class Config:
@@ -41,12 +42,35 @@ class UserUpdate(BaseModel):
     email: EmailStr | None = None
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class UserRoleUpdate(BaseModel):
-    role: Literal["admin", "teacher"]
+    role: Literal["superadmin", "admin", "teacher", "parent"]
 
 
 class UserBlockUpdate(BaseModel):
     is_blocked: bool
+
+
+class SchoolAdminCreate(BaseModel):
+    first_name: str
+    last_name: str
+    middle_name: str
+    email: EmailStr
+    password: str
+    school_id: str
+
+
+class SchoolUserCreate(BaseModel):
+    first_name: str
+    last_name: str
+    middle_name: str = ""
+    email: EmailStr
+    password: str
+    role: Literal["admin", "teacher", "parent"]
 
 
 class Token(BaseModel):

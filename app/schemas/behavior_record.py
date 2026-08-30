@@ -9,6 +9,7 @@ class BehaviorCreate(BaseModel):
     subject: str
     reasons: List[str]
     comment: Optional[str] = Field(default=None, max_length=150)
+    photo_url: Optional[str] = None
 
 
 class BehaviorOut(BehaviorCreate):

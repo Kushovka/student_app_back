@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.behavior_records import router as behavior_router
 from app.api.schools import router as schools_router
@@ -8,6 +9,7 @@ from app.api.auth import router as auth_router
 from app.api.profile import router as profile_router
 from app.api.users import router as users_router
 from app.api.report import router as report_router
+from app.api.max_bot import router as max_router
 from app.core.config import settings
 
 
@@ -29,6 +31,9 @@ app.include_router(profile_router)
 app.include_router(schools_router)
 app.include_router(users_router)
 app.include_router(report_router)
+app.include_router(max_router)
+app.extra["max_webhook_secret"] = settings.MAX_WEBHOOK_SECRET
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 @app.get("/health")

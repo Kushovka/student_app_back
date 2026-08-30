@@ -4,6 +4,11 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+class SchoolCreate(BaseModel):
+    name: str
+    city: str | None = None
+
+
 class SchoolOut(BaseModel):
     id: str
     name: str

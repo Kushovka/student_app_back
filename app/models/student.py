@@ -21,4 +21,9 @@ class Student(Base):
     behavior_records = relationship(
         "BehaviorRecord", backref="student", cascade="all, delete"
     )
+    parent_links = relationship(
+        "ParentStudent",
+        back_populates="student",
+        cascade="all, delete-orphan",
+    )
     school = relationship("School", back_populates="students")

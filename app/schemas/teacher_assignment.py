@@ -1,15 +1,12 @@
-from datetime import date
-
 from pydantic import BaseModel, field_validator
 
 from app.schemas.classroom import normalize_class_letter, validate_grade_range
 
 
-class BehaviorClassReportRequest(BaseModel):
+class TeacherAssignmentCreate(BaseModel):
     grade: int
     class_letter: str
-    date_from: date
-    date_to: date
+    subject: str
 
     @field_validator("grade")
     @classmethod
@@ -22,19 +19,13 @@ class BehaviorClassReportRequest(BaseModel):
         return normalize_class_letter(value)
 
 
-class BehaviorReportRow(BaseModel):
-    full_name: str
-    class_name: str
-    subject: str
-    date: date
-    violation: str
-
-
-class BehaviorClassReportResponse(BaseModel):
+class TeacherAssignmentOut(BaseModel):
+    id: str
+    teacher_id: str
     school_id: str
     grade: int
     class_letter: str
-    date_from: date
-    date_to: date
-    total: int
-    items: list[BehaviorReportRow]
+    subject: str
+
+    class Config:
+        from_attributes = True

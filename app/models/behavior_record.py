@@ -17,6 +17,7 @@ class BehaviorRecord(Base):
     subject = Column(String, nullable=False)
     reasons = Column(JSON, nullable=False)
     comment = Column(String, nullable=True)
+    photo_url = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     school = relationship("School", back_populates="behavior_records")

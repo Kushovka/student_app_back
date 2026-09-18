@@ -1,9 +1,11 @@
 ALLOWED_CLASS_LETTERS = set("АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+MIN_GRADE = 5
+MAX_GRADE = 9
 
 
 def validate_grade_range(value: int) -> int:
-    if value < 1 or value > 11:
-        raise ValueError("Grade must be between 1 and 11")
+    if value < MIN_GRADE or value > MAX_GRADE:
+        raise ValueError("Grade must be between 5 and 9")
     return value
 
 

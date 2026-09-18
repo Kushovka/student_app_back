@@ -1,7 +1,12 @@
 import csv
+import re
+import subprocess
+import tempfile
 from io import BytesIO, StringIO
+from pathlib import Path
 from typing import Optional
 
+from docx import Document
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import and_, false, or_
 
@@ -14,22 +19,35 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.deps import get_current_user
 from app.db.deps import get_db
 from app.models.parent_student import ParentStudent
+from app.models.classroom import Classroom
 from app.models.student import Student
 from app.models.teacher_assignment import TeacherAssignment
 from app.models.user import User
 from app.schemas.auth import UserOut
-from app.schemas.classroom import normalize_class_letter, validate_grade_range
+from app.schemas.classroom import MAX_GRADE, MIN_GRADE, normalize_class_letter, validate_grade_range
 from app.schemas.student import (
     ClassOptionsResponse,
+    ClassroomCreate,
     ParentStudentCreate,
     ParentStudentOut,
     StudentCreate,
     StudentListResponse,
     StudentOut,
     StudentUpdate,
+    HomeroomTeacherOut,
 )
 
 router = APIRouter(prefix="/student", tags=["Students"])
+
+CLASS_HEADING_RE = re.compile(
+    r"\b(?P<grade>\d{1,2})\s*[«\"“”']?\s*(?P<letter>[А-ЯЁ])\s*[»\"“”']?\s+класс[а-яё]*\b",
+    re.IGNORECASE,
+)
+STUDENT_LINE_RE = re.compile(
+    r"^\s*(?:\d+[.)]\s*)?(?P<last>[А-ЯЁ][А-ЯЁа-яё'-]*)\s+"
+    r"(?P<first>[А-ЯЁ][А-ЯЁа-яё'-]*)\s+"
+    r"(?P<middle>[А-ЯЁ][А-ЯЁа-яё'-]*)\s*$"
+)
 
 
 class NotificationRequests(BaseModel):
@@ -40,6 +58,11 @@ class NotificationRequests(BaseModel):
 def require_admin(current_user: User) -> None:
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def require_parent_manager(current_user: User) -> None:
+    if current_user.role != "admin" and not current_user.is_class_teacher:
+        raise HTTPException(status_code=403, detail="Parent management access required")
 
 
 def build_class_suffix(grade: int | None, class_letter: str | None) -> str:
@@ -89,6 +112,8 @@ def teacher_class_clauses(db: Session, teacher: User):
         .distinct()
         .all()
     )
+    if teacher.is_class_teacher:
+        assignments.append((teacher.homeroom_grade, teacher.homeroom_class_letter))
     if not assignments:
         return [false()]
     return [
@@ -98,6 +123,8 @@ def teacher_class_clauses(db: Session, teacher: User):
 
 
 def teacher_can_access_student(db: Session, teacher: User, student: Student) -> bool:
+    if class_teacher_can_access_student(teacher, student):
+        return True
     return (
         db.query(TeacherAssignment.id)
         .filter(
@@ -111,37 +138,212 @@ def teacher_can_access_student(db: Session, teacher: User, student: Student) -> 
     )
 
 
-def auto_link_parent_by_email(db: Session, student: Student) -> None:
-    parent = (
+def class_teacher_can_access_student(class_teacher: User, student: Student) -> bool:
+    return (
+        class_teacher.is_class_teacher
+        and class_teacher.homeroom_grade == student.grade
+        and class_teacher.homeroom_class_letter == student.class_letter
+    )
+
+
+def get_homeroom_teacher(db: Session, student: Student) -> User | None:
+    return (
         db.query(User)
         .filter(
             User.school_id == student.school_id,
-            User.role == "parent",
-            User.email.ilike(student.email),
+            User.role == "teacher",
+            User.is_blocked.is_(False),
+            User.homeroom_grade == student.grade,
+            User.homeroom_class_letter == student.class_letter,
         )
+        .order_by(User.last_name, User.first_name)
         .first()
     )
-    if not parent:
-        return
 
-    existing = (
-        db.query(ParentStudent)
+
+def class_exists(db: Session, school_id: str, grade: int, class_letter: str) -> bool:
+    return (
+        db.query(Classroom.id)
         .filter(
-            ParentStudent.parent_id == parent.id,
-            ParentStudent.student_id == student.id,
+            Classroom.school_id == school_id,
+            Classroom.grade == grade,
+            Classroom.class_letter == class_letter,
+        )
+        .first()
+        is not None
+    )
+
+
+def extract_word_text(filename: str, raw: bytes) -> str:
+    if filename.endswith(".docx"):
+        document = Document(BytesIO(raw))
+        lines = [paragraph.text for paragraph in document.paragraphs]
+        for table in document.tables:
+            lines.extend(" ".join(cell.text for cell in row.cells) for row in table.rows)
+        return "\n".join(lines)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        source_path = Path(temp_dir) / "students.doc"
+        source_path.write_bytes(raw)
+        try:
+            result = subprocess.run(
+                ["antiword", "-w", "0", str(source_path)],
+                capture_output=True,
+                check=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Не удалось прочитать Word-файл. Сохраните его как DOCX или XLSX и повторите импорт.",
+            ) from exc
+    return result.stdout
+
+
+def parse_word_students(text: str, grade: int, class_letter: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    active_class = False
+    has_class_headings = False
+
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.replace("\ufeff", "").replace("|", " ").split())
+        heading = CLASS_HEADING_RE.search(line)
+        if heading:
+            has_class_headings = True
+            active_class = (
+                int(heading.group("grade")) == grade
+                and normalize_class_letter(heading.group("letter")) == class_letter
+            )
+            continue
+
+        if line.lower().startswith(("директор", "классный руководитель")):
+            active_class = False
+            continue
+
+        if has_class_headings and not active_class:
+            continue
+
+        student = STUDENT_LINE_RE.fullmatch(line)
+        if student:
+            rows.append(
+                {
+                    "last_name": student.group("last"),
+                    "first_name": student.group("first"),
+                    "middle_name": student.group("middle"),
+                }
+            )
+
+    return rows
+
+
+def parse_word_class_lists(text: str, grade: int) -> dict[str, list[dict[str, str]]]:
+    class_lists: dict[str, list[dict[str, str]]] = {}
+    active_letter: str | None = None
+
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.replace("\ufeff", "").replace("|", " ").split())
+        heading = CLASS_HEADING_RE.search(line)
+        if heading:
+            heading_grade = int(heading.group("grade"))
+            active_letter = (
+                normalize_class_letter(heading.group("letter"))
+                if heading_grade == grade
+                else None
+            )
+            if active_letter:
+                class_lists.setdefault(active_letter, [])
+            continue
+
+        if line.lower().startswith(("директор", "классный руководитель")):
+            active_letter = None
+            continue
+
+        if not active_letter:
+            continue
+
+        student = STUDENT_LINE_RE.fullmatch(line)
+        if student:
+            class_lists[active_letter].append(
+                {
+                    "last_name": student.group("last"),
+                    "first_name": student.group("first"),
+                    "middle_name": student.group("middle"),
+                }
+            )
+
+    return {letter: students for letter, students in class_lists.items() if students}
+
+
+@router.post("/classes", response_model=ClassroomCreate, status_code=201)
+def create_classroom(
+    data: ClassroomCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
+    if class_exists(db, current_user.school_id, data.grade, data.class_letter):
+        raise HTTPException(status_code=409, detail="Class already exists")
+
+    classroom = Classroom(
+        school_id=current_user.school_id,
+        grade=data.grade,
+        class_letter=data.class_letter,
+    )
+    db.add(classroom)
+    db.commit()
+    return {"grade": classroom.grade, "class_letter": classroom.class_letter}
+
+
+@router.delete("/classes/{grade}/{class_letter}", status_code=204)
+def delete_classroom(
+    grade: int,
+    class_letter: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
+    try:
+        normalized_grade = validate_grade_range(grade)
+        normalized_letter = normalize_class_letter(class_letter)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid grade or class letter") from None
+
+    classroom = (
+        db.query(Classroom)
+        .filter(
+            Classroom.school_id == current_user.school_id,
+            Classroom.grade == normalized_grade,
+            Classroom.class_letter == normalized_letter,
         )
         .first()
     )
-    if existing:
-        return
+    if not classroom:
+        raise HTTPException(status_code=404, detail="Class not found")
 
-    db.add(
-        ParentStudent(
-            parent_id=parent.id,
-            student_id=student.id,
-            relationship="Родитель",
+    has_students = (
+        db.query(Student.id)
+        .filter(
+            Student.school_id == current_user.school_id,
+            Student.grade == normalized_grade,
+            Student.class_letter == normalized_letter,
         )
+        .first()
+        is not None
     )
+    if has_students:
+        raise HTTPException(
+            status_code=409,
+            detail="Remove or move all students before deleting this class",
+        )
+
+    db.delete(classroom)
+    db.commit()
 
 
 @router.get("/", response_model=StudentListResponse)
@@ -157,7 +359,10 @@ def get_students(
     if not current_user.school_id:
         raise HTTPException(status_code=403, detail="User is not linked to a school")
 
-    query = db.query(Student).filter(Student.school_id == current_user.school_id)
+    query = db.query(Student).filter(
+        Student.school_id == current_user.school_id,
+        Student.grade.between(MIN_GRADE, MAX_GRADE),
+    )
     normalized_class_letter = None
     if class_letter is not None:
         try:
@@ -174,7 +379,7 @@ def get_students(
         try:
             grade = validate_grade_range(grade)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Grade must be between 1 and 11") from None
+            raise HTTPException(status_code=400, detail="Grade must be between 5 and 9") from None
         query = query.filter(Student.grade == grade)
 
     if normalized_class_letter is not None:
@@ -189,7 +394,6 @@ def get_students(
                         Student.first_name.ilike(f"{term}%"),
                         Student.last_name.ilike(f"{term}%"),
                         Student.middle_name.ilike(f"{term}%"),
-                        Student.email.ilike(f"{term}%"),
                     )
                     for term in search_terms
                 ]
@@ -225,17 +429,59 @@ def get_class_options(
         raise HTTPException(status_code=403, detail="User is not linked to a school")
 
     query = (
-        db.query(Student.grade, Student.class_letter)
-        .filter(Student.school_id == current_user.school_id)
+        db.query(Classroom.grade, Classroom.class_letter)
+        .filter(
+            Classroom.school_id == current_user.school_id,
+            Classroom.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .distinct()
     )
 
     if current_user.role == "parent":
-        query = query.join(ParentStudent).filter(ParentStudent.parent_id == current_user.id)
+        query = (
+            query.join(
+                Student,
+                and_(
+                    Student.school_id == Classroom.school_id,
+                    Student.grade == Classroom.grade,
+                    Student.class_letter == Classroom.class_letter,
+                ),
+            )
+            .join(ParentStudent)
+            .filter(ParentStudent.parent_id == current_user.id)
+        )
     elif current_user.role == "teacher":
-        query = query.filter(or_(*teacher_class_clauses(db, current_user)))
+        assignments = (
+            db.query(TeacherAssignment.grade, TeacherAssignment.class_letter)
+            .filter(
+                TeacherAssignment.teacher_id == current_user.id,
+                TeacherAssignment.school_id == current_user.school_id,
+            )
+            .distinct()
+            .all()
+        )
+        accessible_classes = {
+            (assignment_grade, assignment_letter)
+            for assignment_grade, assignment_letter in assignments
+        }
+        if current_user.is_class_teacher:
+            accessible_classes.add(
+                (current_user.homeroom_grade, current_user.homeroom_class_letter)
+            )
 
-    rows = query.order_by(asc(Student.grade), asc(Student.class_letter)).all()
+        if not accessible_classes:
+            query = query.filter(false())
+        else:
+            query = query.filter(
+                or_(
+                    *[
+                        and_(Classroom.grade == grade, Classroom.class_letter == class_letter)
+                        for grade, class_letter in accessible_classes
+                    ]
+                )
+            )
+
+    rows = query.order_by(asc(Classroom.grade), asc(Classroom.class_letter)).all()
     classes = [
         {"grade": grade, "class_letter": class_letter}
         for grade, class_letter in rows
@@ -260,12 +506,15 @@ def export_students(
         raise HTTPException(status_code=403, detail="User is not linked to a school")
     require_admin(current_user)
 
-    query = db.query(Student).filter(Student.school_id == current_user.school_id)
+    query = db.query(Student).filter(
+        Student.school_id == current_user.school_id,
+        Student.grade.between(MIN_GRADE, MAX_GRADE),
+    )
     if grade is not None:
         try:
             grade = validate_grade_range(grade)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Grade must be between 1 and 11") from None
+            raise HTTPException(status_code=400, detail="Grade must be between 5 and 9") from None
         query = query.filter(Student.grade == grade)
     if class_letter is not None:
         try:
@@ -277,13 +526,12 @@ def export_students(
     students = query.order_by(asc(Student.grade), asc(Student.class_letter), asc(Student.last_name)).all()
     filename_class = build_class_suffix(grade, class_letter)
 
-    headers = ["last_name", "first_name", "middle_name", "email", "grade", "class_letter"]
+    headers = ["last_name", "first_name", "middle_name", "grade", "class_letter"]
     rows = [
         [
             student.last_name,
             student.first_name,
             student.middle_name,
-            student.email,
             student.grade,
             student.class_letter,
         ]
@@ -310,7 +558,7 @@ def export_students(
     sheet.append(headers)
     for row in rows:
         sheet.append(row)
-    for column, width in {"A": 20, "B": 18, "C": 22, "D": 30, "E": 10, "F": 14}.items():
+    for column, width in {"A": 20, "B": 18, "C": 22, "D": 10, "E": 14}.items():
         sheet.column_dimensions[column].width = width
     workbook.save(output)
     output.seek(0)
@@ -326,6 +574,8 @@ def export_students(
 @router.post("/import")
 def import_students(
     file: UploadFile = File(...),
+    grade: Optional[int] = None,
+    class_letter: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -336,6 +586,19 @@ def import_students(
     raw = file.file.read()
     name = (file.filename or "").lower()
     rows: list[dict[str, str]] = []
+
+    target_grade = None
+    target_letter = None
+    if grade is not None or class_letter is not None:
+        if grade is None or class_letter is None:
+            raise HTTPException(status_code=400, detail="Grade and class_letter must be provided together")
+        try:
+            target_grade = validate_grade_range(grade)
+            target_letter = normalize_class_letter(class_letter)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid grade or class_letter") from None
+        if not class_exists(db, current_user.school_id, target_grade, target_letter):
+            raise HTTPException(status_code=404, detail="Class not found")
 
     if name.endswith(".csv"):
         text = raw.decode("utf-8-sig")
@@ -354,10 +617,26 @@ def import_students(
                         if index < len(headers)
                     }
                 )
+    elif name.endswith((".doc", ".docx")):
+        if target_grade is None or target_letter is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Для Word-файла выберите страницу нужного класса перед импортом",
+            )
+        rows = parse_word_students(
+            extract_word_text(name, raw), target_grade, target_letter
+        )
+        if not rows:
+            raise HTTPException(
+                status_code=400,
+                detail="В файле не найден нумерованный список учеников выбранного класса",
+            )
     else:
-        raise HTTPException(status_code=400, detail="Only CSV and XLSX files are supported")
+        raise HTTPException(status_code=400, detail="Поддерживаются файлы CSV, XLSX, DOC и DOCX")
 
-    required = {"last_name", "first_name", "middle_name", "email", "grade", "class_letter"}
+    required = {"last_name", "first_name", "middle_name"}
+    if target_grade is None:
+        required.update({"grade", "class_letter"})
     created = 0
     skipped = 0
     errors: list[str] = []
@@ -370,29 +649,123 @@ def import_students(
             continue
 
         try:
-            grade = validate_grade_range(int(str(normalized["grade"]).strip()))
-            class_letter = normalize_class_letter(str(normalized["class_letter"]))
+            row_grade = target_grade or validate_grade_range(int(str(normalized["grade"]).strip()))
+            row_class_letter = target_letter or normalize_class_letter(str(normalized["class_letter"]))
         except ValueError:
             skipped += 1
             errors.append(f"Row {index}: invalid grade or class_letter")
+            continue
+
+        if not class_exists(db, current_user.school_id, row_grade, row_class_letter):
+            skipped += 1
+            errors.append(f"Row {index}: class does not exist")
             continue
 
         student = Student(
             first_name=str(normalized["first_name"]).strip(),
             last_name=str(normalized["last_name"]).strip(),
             middle_name=str(normalized["middle_name"]).strip(),
-            email=str(normalized["email"]).strip(),
-            grade=grade,
-            class_letter=class_letter,
+            grade=row_grade,
+            class_letter=row_class_letter,
             school_id=current_user.school_id,
         )
         db.add(student)
-        db.flush()
-        auto_link_parent_by_email(db, student)
         created += 1
 
     db.commit()
     return {"created": created, "skipped": skipped, "errors": errors[:20]}
+
+
+@router.post("/import-class-lists")
+def import_word_class_lists(
+    file: UploadFile = File(...),
+    grade: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+    require_admin(current_user)
+    try:
+        target_grade = validate_grade_range(grade)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid grade") from None
+
+    name = (file.filename or "").lower()
+    if not name.endswith((".doc", ".docx")):
+        raise HTTPException(status_code=400, detail="Для импорта списков нужен Word-файл DOC или DOCX")
+
+    class_lists = parse_word_class_lists(
+        extract_word_text(name, file.file.read()), target_grade
+    )
+    if not class_lists:
+        raise HTTPException(
+            status_code=400,
+            detail="В файле не найдены нумерованные списки выбранной параллели",
+        )
+
+    existing_classes = {
+        class_letter
+        for (class_letter,) in db.query(Classroom.class_letter)
+        .filter(
+            Classroom.school_id == current_user.school_id,
+            Classroom.grade == target_grade,
+        )
+        .all()
+    }
+    created_classes: list[str] = []
+    for class_letter in sorted(class_lists):
+        if class_letter not in existing_classes:
+            db.add(
+                Classroom(
+                    school_id=current_user.school_id,
+                    grade=target_grade,
+                    class_letter=class_letter,
+                )
+            )
+            created_classes.append(class_letter)
+
+    existing_students = {
+        (student.class_letter, student.last_name, student.first_name, student.middle_name)
+        for student in db.query(Student)
+        .filter(
+            Student.school_id == current_user.school_id,
+            Student.grade == target_grade,
+            Student.class_letter.in_(class_lists),
+        )
+        .all()
+    }
+    created_students = 0
+    skipped_students = 0
+    seen_students: set[tuple[str, str, str, str]] = set()
+    for class_letter, students in class_lists.items():
+        for student in students:
+            student_key = (
+                class_letter,
+                student["last_name"],
+                student["first_name"],
+                student["middle_name"],
+            )
+            if student_key in existing_students or student_key in seen_students:
+                skipped_students += 1
+                continue
+            db.add(
+                Student(
+                    school_id=current_user.school_id,
+                    grade=target_grade,
+                    class_letter=class_letter,
+                    **student,
+                )
+            )
+            seen_students.add(student_key)
+            created_students += 1
+
+    db.commit()
+    return {
+        "created_classes": created_classes,
+        "created_students": created_students,
+        "skipped_students": skipped_students,
+    }
 
 
 @router.get("/{student_id}", response_model=StudentOut)
@@ -406,7 +779,11 @@ def get_student_by_id(
 
     student = (
         db.query(Student)
-        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .first()
     )
 
@@ -420,8 +797,8 @@ def get_student_by_id(
     return student
 
 
-@router.get("/{student_id}/parents", response_model=list[ParentStudentOut])
-def get_student_parents(
+@router.get("/{student_id}/class-teacher", response_model=HomeroomTeacherOut | None)
+def get_student_class_teacher(
     student_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -431,7 +808,11 @@ def get_student_parents(
 
     student = (
         db.query(Student)
-        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .first()
     )
     if not student:
@@ -439,6 +820,36 @@ def get_student_parents(
     if current_user.role == "parent" and not parent_can_access_student(db, current_user, student.id):
         raise HTTPException(status_code=404, detail="Student not found")
     if current_user.role == "teacher" and not teacher_can_access_student(db, current_user, student):
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    return get_homeroom_teacher(db, student)
+
+
+@router.get("/{student_id}/parents", response_model=list[ParentStudentOut])
+def get_student_parents(
+    student_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+    if current_user.role == "teacher" and not current_user.is_class_teacher:
+        raise HTTPException(status_code=403, detail="Teachers cannot access parent links")
+
+    student = (
+        db.query(Student)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
+        .first()
+    )
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    if current_user.role == "parent" and not parent_can_access_student(db, current_user, student.id):
+        raise HTTPException(status_code=404, detail="Student not found")
+    if current_user.role == "teacher" and not class_teacher_can_access_student(current_user, student):
         raise HTTPException(status_code=404, detail="Student not found")
 
     return (
@@ -460,14 +871,20 @@ def get_available_parents(
 ):
     if not current_user.school_id:
         raise HTTPException(status_code=403, detail="User is not linked to a school")
-    require_admin(current_user)
+    require_parent_manager(current_user)
 
     student = (
         db.query(Student)
-        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .first()
     )
     if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    if current_user.role == "teacher" and not class_teacher_can_access_student(current_user, student):
         raise HTTPException(status_code=404, detail="Student not found")
 
     linked_parent_ids = (
@@ -492,7 +909,7 @@ def get_available_parents(
                         User.first_name.ilike(f"{term}%"),
                         User.last_name.ilike(f"{term}%"),
                         User.middle_name.ilike(f"{term}%"),
-                        User.email.ilike(f"{term}%"),
+                        User.login.ilike(f"{term}%"),
                     )
                     for term in search_terms
                 ]
@@ -511,14 +928,20 @@ def attach_parent_to_student(
 ):
     if not current_user.school_id:
         raise HTTPException(status_code=403, detail="User is not linked to a school")
-    require_admin(current_user)
+    require_parent_manager(current_user)
 
     student = (
         db.query(Student)
-        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .first()
     )
     if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    if current_user.role == "teacher" and not class_teacher_can_access_student(current_user, student):
         raise HTTPException(status_code=404, detail="Student not found")
 
     parent = (
@@ -569,11 +992,15 @@ def detach_parent_from_student(
 ):
     if not current_user.school_id:
         raise HTTPException(status_code=403, detail="User is not linked to a school")
-    require_admin(current_user)
+    require_parent_manager(current_user)
 
     student = (
         db.query(Student)
-        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .first()
     )
     if not student:
@@ -609,11 +1036,20 @@ def update_student(
 
     student = (
         db.query(Student)
-        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .first()
     )
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
+
+    next_grade = data.grade if data.grade is not None else student.grade
+    next_class_letter = data.class_letter if data.class_letter is not None else student.class_letter
+    if not class_exists(db, current_user.school_id, next_grade, next_class_letter):
+        raise HTTPException(status_code=404, detail="Class not found")
 
     if data.first_name is not None:
         student.first_name = data.first_name
@@ -621,8 +1057,6 @@ def update_student(
         student.last_name = data.last_name
     if data.middle_name is not None:
         student.middle_name = data.middle_name
-    if data.email is not None:
-        student.email = data.email
     if data.grade is not None:
         student.grade = data.grade
     if data.class_letter is not None:
@@ -630,8 +1064,6 @@ def update_student(
 
     db.commit()
     db.refresh(student)
-    auto_link_parent_by_email(db, student)
-    db.commit()
     return student
 
 
@@ -645,11 +1077,13 @@ def create_students(
         raise HTTPException(status_code=403, detail="User is not linked to a school")
     require_admin(current_user)
 
+    if not class_exists(db, current_user.school_id, data.grade, data.class_letter):
+        raise HTTPException(status_code=404, detail="Class not found")
+
     student = Student(
         first_name=data.first_name,
         last_name=data.last_name,
         middle_name=data.middle_name,
-        email=data.email,
         grade=data.grade,
         class_letter=data.class_letter,
         school_id=current_user.school_id,
@@ -657,8 +1091,6 @@ def create_students(
     db.add(student)
     db.commit()
     db.refresh(student)
-    auto_link_parent_by_email(db, student)
-    db.commit()
     return student
 
 
@@ -674,7 +1106,11 @@ def delete_student(
 
     student = (
         db.query(Student)
-        .filter(Student.id == student_id, Student.school_id == current_user.school_id)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .first()
     )
 

@@ -22,6 +22,7 @@ from app.schemas.report import (
     BehaviorClassReportRequest,
     BehaviorClassReportResponse,
 )
+from app.schemas.classroom import MAX_GRADE, MIN_GRADE
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -50,13 +51,15 @@ def build_school_dashboard_data(db: Session, school_id: str) -> dict:
 
     records = (
         db.query(BehaviorRecord)
-        .filter(BehaviorRecord.school_id == school_id)
+        .join(Student, Student.id == BehaviorRecord.student_id)
+        .filter(
+            BehaviorRecord.school_id == school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .all()
     )
-    severity = {"green": 0, "yellow": 0, "red": 0}
     reasons: dict[str, int] = {}
     for record in records:
-        severity[record.severity] = severity.get(record.severity, 0) + 1
         for reason in record.reasons or []:
             reasons[reason] = reasons.get(reason, 0) + 1
 
@@ -92,7 +95,10 @@ def build_school_dashboard_data(db: Session, school_id: str) -> dict:
         },
         "students": (
             db.query(func.count(Student.id))
-            .filter(Student.school_id == school_id)
+            .filter(
+                Student.school_id == school_id,
+                Student.grade.between(MIN_GRADE, MAX_GRADE),
+            )
             .scalar()
             or 0
         ),
@@ -106,7 +112,6 @@ def build_school_dashboard_data(db: Session, school_id: str) -> dict:
         "total_30_days": sum(
             1 for record in records if record.created_at >= now - timedelta(days=30)
         ),
-        "severity": severity,
         "top_classes": [
             {"class_name": f"{grade}{letter}", "total": total}
             for grade, letter, total in top_classes_rows
@@ -202,17 +207,21 @@ def get_dashboard(
     now = datetime.utcnow()
     total_7_days = (
         db.query(func.count(BehaviorRecord.id))
+        .join(Student, Student.id == BehaviorRecord.student_id)
         .filter(
             BehaviorRecord.school_id == current_user.school_id,
             BehaviorRecord.created_at >= now - timedelta(days=7),
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
         )
         .scalar()
     )
     total_30_days = (
         db.query(func.count(BehaviorRecord.id))
+        .join(Student, Student.id == BehaviorRecord.student_id)
         .filter(
             BehaviorRecord.school_id == current_user.school_id,
             BehaviorRecord.created_at >= now - timedelta(days=30),
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
         )
         .scalar()
     )
@@ -224,7 +233,10 @@ def get_dashboard(
             func.count(BehaviorRecord.id).label("total"),
         )
         .join(Student, Student.id == BehaviorRecord.student_id)
-        .filter(BehaviorRecord.school_id == current_user.school_id)
+        .filter(
+            BehaviorRecord.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .group_by(Student.grade, Student.class_letter)
         .order_by(func.count(BehaviorRecord.id).desc())
         .limit(5)
@@ -233,13 +245,15 @@ def get_dashboard(
 
     records = (
         db.query(BehaviorRecord)
-        .filter(BehaviorRecord.school_id == current_user.school_id)
+        .join(Student, Student.id == BehaviorRecord.student_id)
+        .filter(
+            BehaviorRecord.school_id == current_user.school_id,
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .all()
     )
     reasons: dict[str, int] = {}
-    severity = {"green": 0, "yellow": 0, "red": 0}
     for record in records:
-        severity[record.severity] = severity.get(record.severity, 0) + 1
         for reason in record.reasons or []:
             reasons[reason] = reasons.get(reason, 0) + 1
 
@@ -256,7 +270,6 @@ def get_dashboard(
             for grade, letter, total in top_classes_rows
         ],
         "top_reasons": top_reasons,
-        "severity": severity,
     }
 
 
@@ -270,41 +283,63 @@ def get_platform_dashboard(
     now = datetime.utcnow()
     schools = db.query(School).order_by(School.name.asc()).all()
     school_stats = []
-    platform_severity = {"green": 0, "yellow": 0, "red": 0}
 
     total_users = db.query(func.count(User.id)).scalar() or 0
-    total_students = db.query(func.count(Student.id)).scalar() or 0
-    total_records = db.query(func.count(BehaviorRecord.id)).scalar() or 0
+    total_students = (
+        db.query(func.count(Student.id))
+        .filter(Student.grade.between(MIN_GRADE, MAX_GRADE))
+        .scalar()
+        or 0
+    )
+    total_records = (
+        db.query(func.count(BehaviorRecord.id))
+        .join(Student, Student.id == BehaviorRecord.student_id)
+        .filter(Student.grade.between(MIN_GRADE, MAX_GRADE))
+        .scalar()
+        or 0
+    )
     total_7_days = (
         db.query(func.count(BehaviorRecord.id))
-        .filter(BehaviorRecord.created_at >= now - timedelta(days=7))
+        .join(Student, Student.id == BehaviorRecord.student_id)
+        .filter(
+            BehaviorRecord.created_at >= now - timedelta(days=7),
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .scalar()
         or 0
     )
     total_30_days = (
         db.query(func.count(BehaviorRecord.id))
-        .filter(BehaviorRecord.created_at >= now - timedelta(days=30))
+        .join(Student, Student.id == BehaviorRecord.student_id)
+        .filter(
+            BehaviorRecord.created_at >= now - timedelta(days=30),
+            Student.grade.between(MIN_GRADE, MAX_GRADE),
+        )
         .scalar()
         or 0
     )
 
-    all_records = db.query(BehaviorRecord).all()
+    all_records = (
+        db.query(BehaviorRecord)
+        .join(Student, Student.id == BehaviorRecord.student_id)
+        .filter(Student.grade.between(MIN_GRADE, MAX_GRADE))
+        .all()
+    )
     reasons: dict[str, int] = {}
     for record in all_records:
-        platform_severity[record.severity] = platform_severity.get(record.severity, 0) + 1
         for reason in record.reasons or []:
             reasons[reason] = reasons.get(reason, 0) + 1
 
     for school in schools:
         school_records = (
             db.query(BehaviorRecord)
-            .filter(BehaviorRecord.school_id == school.id)
+            .join(Student, Student.id == BehaviorRecord.student_id)
+            .filter(
+                BehaviorRecord.school_id == school.id,
+                Student.grade.between(MIN_GRADE, MAX_GRADE),
+            )
             .all()
         )
-        severity = {"green": 0, "yellow": 0, "red": 0}
-        for record in school_records:
-            severity[record.severity] = severity.get(record.severity, 0) + 1
-
         role_counts = {
             role: (
                 db.query(func.count(User.id))
@@ -329,7 +364,10 @@ def get_platform_dashboard(
                 "city": school.city,
                 "students": (
                     db.query(func.count(Student.id))
-                    .filter(Student.school_id == school.id)
+                    .filter(
+                        Student.school_id == school.id,
+                        Student.grade.between(MIN_GRADE, MAX_GRADE),
+                    )
                     .scalar()
                     or 0
                 ),
@@ -339,7 +377,6 @@ def get_platform_dashboard(
                 "records_total": len(school_records),
                 "records_7_days": records_7_days,
                 "records_30_days": records_30_days,
-                "severity": severity,
             }
         )
 
@@ -355,7 +392,6 @@ def get_platform_dashboard(
         "total_records": total_records,
         "total_7_days": total_7_days,
         "total_30_days": total_30_days,
-        "severity": platform_severity,
         "top_reasons": top_reasons,
         "schools": sorted(
             school_stats,

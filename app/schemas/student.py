@@ -10,7 +10,6 @@ class StudentBase(BaseModel):
     middle_name: str
     grade: int
     class_letter: str
-    email: str = ""
 
     @field_validator("grade")
     @classmethod
@@ -27,13 +26,27 @@ class StudentCreate(StudentBase):
     pass
 
 
+class ClassroomCreate(BaseModel):
+    grade: int
+    class_letter: str
+
+    @field_validator("grade")
+    @classmethod
+    def validate_grade(cls, value: int) -> int:
+        return validate_grade_range(value)
+
+    @field_validator("class_letter")
+    @classmethod
+    def validate_class_letter(cls, value: str) -> str:
+        return normalize_class_letter(value)
+
+
 class StudentUpdate(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     middle_name: str | None = None
     grade: int | None = None
     class_letter: str | None = None
-    email: str | None = None
 
     @field_validator("grade")
     @classmethod
@@ -53,6 +66,16 @@ class StudentUpdate(BaseModel):
 class StudentOut(StudentBase):
     id: str
     school_id: str
+
+    class Config:
+        from_attributes = True
+
+
+class HomeroomTeacherOut(BaseModel):
+    id: str
+    first_name: str
+    last_name: str
+    middle_name: str
 
     class Config:
         from_attributes = True

@@ -70,10 +70,10 @@ def get_link_code(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "parent":
+    if current_user.role != "parent" and not current_user.is_class_teacher:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="MAX linking is available for parents only",
+            detail="MAX linking is available for parents and homeroom teachers only",
         )
 
     if not current_user.max_link_code:
@@ -95,7 +95,8 @@ def get_link_code(
 @router.post("/webhook", response_model=MaxWebhookOut)
 async def max_webhook(request: Request, db: Session = Depends(get_db)):
     secret = request.app.extra.get("max_webhook_secret")
-    if secret and request.headers.get("X-Max-Webhook-Secret") != secret:
+    # MAX передаёт secret подписки именно в этом заголовке.
+    if secret and request.headers.get("X-Max-Bot-Api-Secret") != secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     payload = await request.json()
@@ -107,24 +108,31 @@ async def max_webhook(request: Request, db: Session = Depends(get_db)):
     if not code or not max_user_id:
         return {"ok": False, "detail": "No link code or MAX user id found"}
 
-    parent = (
+    user = (
         db.query(User)
         .filter(
-            User.role == "parent",
+            (
+                (User.role == "parent")
+                | (
+                    (User.role == "teacher")
+                    & User.homeroom_grade.isnot(None)
+                    & User.homeroom_class_letter.isnot(None)
+                )
+            ),
             User.max_link_code == code,
             User.is_blocked.is_(False),
         )
         .first()
     )
-    if not parent:
-        send_max_text(max_user_id, "Код не найден. Проверьте код в профиле родителя.")
-        return {"ok": False, "detail": "Parent link code not found"}
+    if not user:
+        send_max_text(max_user_id, "Код не найден. Проверьте код в профиле.")
+        return {"ok": False, "detail": "User link code not found"}
 
-    parent.max_user_id = max_user_id
-    parent.max_chat_id = max_chat_id
-    parent.max_link_code = None
-    db.add(parent)
+    user.max_user_id = max_user_id
+    user.max_chat_id = max_chat_id
+    user.max_link_code = None
+    db.add(user)
     db.commit()
 
-    send_max_text(max_user_id, "MAX подключен к родительскому кабинету.")
-    return {"ok": True, "detail": "Parent linked"}
+    send_max_text(max_user_id, "MAX подключен к школьному кабинету.")
+    return {"ok": True, "detail": "User linked"}

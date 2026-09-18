@@ -6,6 +6,7 @@ from app.api.deps import get_current_user
 from app.core.security import hash_password
 from app.db.deps import get_db
 from app.models.school import School
+from app.models.classroom import Classroom
 from app.models.teacher_assignment import TeacherAssignment
 from app.models.user import User
 from app.schemas.auth import (
@@ -19,6 +20,7 @@ from app.schemas.teacher_assignment import (
     TeacherAssignmentCreate,
     TeacherAssignmentOut,
 )
+from app.schemas.classroom import MAX_GRADE, MIN_GRADE
 
 
 router = APIRouter(prefix="/users", tags=["Users"])
@@ -57,6 +59,28 @@ def normalize_assignment(data: TeacherAssignmentCreate) -> tuple[int, str, str]:
     return data.grade, class_letter, subject
 
 
+def ensure_classroom(db: Session, school_id: str, grade: int, class_letter: str) -> None:
+    """Create a class shell when a teacher is assigned before pupils are added."""
+    classroom = (
+        db.query(Classroom)
+        .filter(
+            Classroom.school_id == school_id,
+            Classroom.grade == grade,
+            Classroom.class_letter == class_letter,
+        )
+        .first()
+    )
+    if not classroom:
+        db.add(
+            Classroom(
+                school_id=school_id,
+                grade=grade,
+                class_letter=class_letter,
+            )
+        )
+        db.flush()
+
+
 @router.get("/", response_model=list[UserOut])
 def get_users(
     db: Session = Depends(get_db),
@@ -92,6 +116,7 @@ def get_my_teacher_assignments(
         .filter(
             TeacherAssignment.teacher_id == current_user.id,
             TeacherAssignment.school_id == current_user.school_id,
+            TeacherAssignment.grade.between(MIN_GRADE, MAX_GRADE),
         )
         .order_by(
             asc(TeacherAssignment.grade),
@@ -134,6 +159,7 @@ def get_teacher_assignments(
         .filter(
             TeacherAssignment.teacher_id == teacher.id,
             TeacherAssignment.school_id == teacher.school_id,
+            TeacherAssignment.grade.between(MIN_GRADE, MAX_GRADE),
         )
         .order_by(
             asc(TeacherAssignment.grade),
@@ -226,9 +252,10 @@ def create_school_admin(
     if current_user.role != "superadmin":
         raise HTTPException(status_code=403, detail="Superadmin access required")
 
-    existing_user = db.query(User).filter(User.email == data.email).first()
+    login = data.login.strip().lower()
+    existing_user = db.query(User).filter(User.login == login).first()
     if existing_user:
-        raise HTTPException(status_code=400, detail="User with this email already exists")
+        raise HTTPException(status_code=400, detail="User with this login already exists")
 
     school = db.query(School).filter(School.id == data.school_id).first()
     if not school:
@@ -238,7 +265,7 @@ def create_school_admin(
         first_name=data.first_name,
         last_name=data.last_name,
         middle_name=data.middle_name,
-        email=data.email,
+        login=login,
         hashed_password=hash_password(data.password),
         role="admin",
         is_blocked=False,
@@ -256,24 +283,74 @@ def create_school_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "admin" or not current_user.school_id:
+    if (
+        current_user.role != "admin"
+        and not current_user.is_class_teacher
+    ) or not current_user.school_id:
         raise HTTPException(status_code=403, detail="School admin access required")
+    if current_user.role != "admin" and data.role != "parent":
+        raise HTTPException(status_code=403, detail="Class teachers can create only parents")
 
-    existing_user = db.query(User).filter(User.email == data.email).first()
+    login = data.login.strip().lower()
+    existing_user = db.query(User).filter(User.login == login).first()
     if existing_user:
-        raise HTTPException(status_code=400, detail="User with this email already exists")
+        raise HTTPException(status_code=400, detail="User with this login already exists")
+
+    if data.homeroom_grade is not None:
+        ensure_classroom(
+            db,
+            current_user.school_id,
+            data.homeroom_grade,
+            data.homeroom_class_letter or "",
+        )
+        existing_class_teacher = (
+            db.query(User.id)
+            .filter(
+                User.school_id == current_user.school_id,
+                User.role == "teacher",
+                User.homeroom_grade == data.homeroom_grade,
+                User.homeroom_class_letter == data.homeroom_class_letter,
+            )
+            .first()
+        )
+        if existing_class_teacher:
+            raise HTTPException(status_code=400, detail="Class already has a class teacher")
+
+    normalized_assignments: list[tuple[int, str, str]] = []
+    assignment_keys: set[tuple[int, str, str]] = set()
+    for assignment_data in data.teacher_assignments:
+        grade, class_letter, subject = normalize_assignment(assignment_data)
+        ensure_classroom(db, current_user.school_id, grade, class_letter)
+        key = (grade, class_letter, subject)
+        if key in assignment_keys:
+            raise HTTPException(status_code=400, detail="Duplicate teacher assignment")
+        assignment_keys.add(key)
+        normalized_assignments.append(key)
 
     user = User(
         first_name=data.first_name.strip(),
         last_name=data.last_name.strip(),
         middle_name=data.middle_name.strip(),
-        email=data.email,
+        login=login,
         hashed_password=hash_password(data.password),
         role=data.role,
+        homeroom_grade=data.homeroom_grade if data.role == "teacher" else None,
+        homeroom_class_letter=data.homeroom_class_letter if data.role == "teacher" else None,
         is_blocked=False,
         school_id=current_user.school_id,
     )
     db.add(user)
+    db.flush()
+    for grade, class_letter, subject in normalized_assignments:
+        db.add(
+            TeacherAssignment(
+                teacher_id=user.id,
+                school_id=current_user.school_id,
+                grade=grade,
+                class_letter=class_letter,
+                subject=subject,
+            )
+        )
     db.commit()
     db.refresh(user)
     return get_school_user_or_404(db, current_user, user.id)
@@ -298,6 +375,10 @@ def update_user_role(
     if current_user.role != "superadmin" and data.role == "superadmin":
         raise HTTPException(status_code=403, detail="Only superadmin can assign superadmin role")
     user.role = data.role
+    if data.role != "teacher":
+        user.homeroom_grade = None
+        user.homeroom_class_letter = None
+        db.query(TeacherAssignment).filter(TeacherAssignment.teacher_id == user.id).delete()
     db.commit()
     db.refresh(user)
     return user
@@ -340,6 +421,25 @@ def delete_user(
         )
 
     user = get_school_user_or_404(db, current_user, user_id)
+
+    if user.role == "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin accounts cannot be deleted",
+        )
+
+    if current_user.role == "superadmin":
+        if user.role not in ("admin", "teacher", "parent"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Superadmin can delete only school admins, teachers, and parents",
+            )
+    elif user.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="School admins cannot delete other admins",
+        )
+
     db.delete(user)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

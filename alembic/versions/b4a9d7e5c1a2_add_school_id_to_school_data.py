@@ -21,24 +21,6 @@ def upgrade() -> None:
     op.add_column("students", sa.Column("school_id", sa.String(), nullable=True))
     op.add_column("behavior_records", sa.Column("school_id", sa.String(), nullable=True))
 
-    op.execute("UPDATE students SET school_id = 'school-demo-1' WHERE school_id IS NULL")
-    op.execute(
-        """
-        UPDATE behavior_records
-        SET school_id = students.school_id
-        FROM students
-        WHERE behavior_records.student_id = students.id
-          AND behavior_records.school_id IS NULL
-        """
-    )
-    op.execute(
-        """
-        UPDATE behavior_records
-        SET school_id = 'school-demo-1'
-        WHERE school_id IS NULL
-        """
-    )
-
     op.alter_column("students", "school_id", nullable=False)
     op.alter_column("behavior_records", "school_id", nullable=False)
 

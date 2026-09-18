@@ -34,23 +34,6 @@ def upgrade() -> None:
     op.create_index("ix_parent_students_parent_id", "parent_students", ["parent_id"])
     op.create_index("ix_parent_students_student_id", "parent_students", ["student_id"])
 
-    op.execute(
-        """
-        INSERT INTO parent_students (id, parent_id, student_id, relationship)
-        SELECT
-            'link-' || u.id || '-' || s.id,
-            u.id,
-            s.id,
-            'Родитель'
-        FROM students s
-        JOIN users u
-          ON lower(u.email) = lower(s.email)
-         AND u.school_id = s.school_id
-         AND u.role = 'parent'
-        ON CONFLICT (parent_id, student_id) DO NOTHING
-        """
-    )
-
 
 def downgrade() -> None:
     op.drop_index("ix_parent_students_student_id", table_name="parent_students")

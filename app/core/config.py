@@ -2,11 +2,11 @@ import os
 
 
 class Settings:
-    DB_USER = os.getenv("POSTGRES_USER", "kirill")
-    DB_PASS = os.getenv("POSTGRES_PASSWORD", "kirill")
+    DB_USER = os.getenv("POSTGRES_USER")
+    DB_PASS = os.getenv("POSTGRES_PASSWORD")
     DB_HOST = os.getenv("POSTGRES_HOST", "db")
     DB_PORT = os.getenv("POSTGRES_PORT", "5432")
-    DB_NAME = os.getenv("POSTGRES_DB", "student_db")
+    DB_NAME = os.getenv("POSTGRES_DB")
     BACKEND_CORS_ORIGINS = os.getenv(
         "BACKEND_CORS_ORIGINS",
         "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000",

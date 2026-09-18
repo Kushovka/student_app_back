@@ -6,7 +6,7 @@ from app.core.security import hash_password, verify_password
 from app.db.deps import get_db
 from app.models.user import User
 from app.schemas.auth import PasswordChange, UserOut, UserUpdate
-from app.services.auth_service import get_user_by_email
+from app.services.auth_service import get_user_by_login
 
 
 router = APIRouter(prefix="/profile", tags=["Profile"])
@@ -46,12 +46,13 @@ def update_me(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if data.email and data.email != current_user.email:
-        existing_user = get_user_by_email(db, data.email)
+    login = data.login.strip().lower() if data.login is not None else None
+    if login and login != current_user.login:
+        existing_user = get_user_by_login(db, login)
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User with this email already exists",
+                detail="User with this login already exists",
             )
 
     if data.first_name is not None:
@@ -60,8 +61,8 @@ def update_me(
         current_user.last_name = data.last_name
     if data.middle_name is not None:
         current_user.middle_name = data.middle_name
-    if data.email is not None:
-        current_user.email = data.email
+    if login is not None:
+        current_user.login = login
 
     db.add(current_user)
     db.commit()

@@ -13,7 +13,6 @@ class Student(Base):
     first_name = Column(String, nullable=False)
     last_name = Column(String, nullable=False)
     middle_name = Column(String, nullable=False)
-    email = Column(String, nullable=False)
     grade = Column(Integer, nullable=False)
     class_letter = Column(String(1), nullable=False)
     school_id = Column(String, ForeignKey("schools.id"), nullable=False)

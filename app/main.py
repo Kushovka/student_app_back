@@ -10,6 +10,7 @@ from app.api.profile import router as profile_router
 from app.api.users import router as users_router
 from app.api.report import router as report_router
 from app.api.max_bot import router as max_router
+from app.api.system_updates import router as system_updates_router
 from app.core.config import settings
 
 
@@ -32,6 +33,7 @@ app.include_router(schools_router)
 app.include_router(users_router)
 app.include_router(report_router)
 app.include_router(max_router)
+app.include_router(system_updates_router)
 app.extra["max_webhook_secret"] = settings.MAX_WEBHOOK_SECRET
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 

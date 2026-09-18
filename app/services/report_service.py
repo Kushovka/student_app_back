@@ -11,9 +11,24 @@ from app.models.behavior_record import BehaviorRecord
 from app.models.student import Student
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+
+PDF_FONT_REGULAR = "DejaVuSans"
+PDF_FONT_BOLD = "DejaVuSans-Bold"
+PDF_FONT_REGULAR_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+PDF_FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+
+def register_pdf_fonts():
+    if PDF_FONT_REGULAR not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(PDF_FONT_REGULAR, PDF_FONT_REGULAR_PATH))
+    if PDF_FONT_BOLD not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(PDF_FONT_BOLD, PDF_FONT_BOLD_PATH))
 
 
 def get_behavior_class_report_data(db, current_user, data):
@@ -200,6 +215,7 @@ def build_behavior_docx(report_data):
 
 
 def build_behavior_pdf(report_data):
+    register_pdf_fonts()
     output = BytesIO()
     doc = SimpleDocTemplate(
         output,
@@ -211,6 +227,16 @@ def build_behavior_pdf(report_data):
     )
 
     styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "BehaviorReportTitle",
+        parent=styles["Title"],
+        fontName=PDF_FONT_BOLD,
+    )
+    normal_style = ParagraphStyle(
+        "BehaviorReportNormal",
+        parent=styles["Normal"],
+        fontName=PDF_FONT_REGULAR,
+    )
     story = []
 
     title = (
@@ -218,11 +244,11 @@ def build_behavior_pdf(report_data):
         f"{report_data['date_from'].strftime('%d.%m.%Y')} - "
         f"{report_data['date_to'].strftime('%d.%m.%Y')}"
     )
-    story.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
+    story.append(Paragraph(title, title_style))
     story.append(
         Paragraph(
             f"<b>Класс:</b> {report_data['grade']}{report_data['class_letter']}",
-            styles["Normal"],
+            normal_style,
         )
     )
     story.append(Spacer(1, 8))
@@ -249,7 +275,8 @@ def build_behavior_pdf(report_data):
             [
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 0), (-1, -1), PDF_FONT_REGULAR),
+                ("FONTNAME", (0, 0), (-1, 0), PDF_FONT_BOLD),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#BFBFBF")),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),

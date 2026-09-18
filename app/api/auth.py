@@ -8,7 +8,7 @@ from app.schemas.auth import Token, UserCreate, UserLogin, UserOut
 from app.services.auth_service import (
     authenticate_user,
     create_user,
-    get_user_by_email,
+    get_user_by_login,
 )
 
 
@@ -17,12 +17,12 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 
 @router.post("/register", response_model=UserOut)
 def register(data: UserCreate, db: Session = Depends(get_db)):
-    existing_user = get_user_by_email(db, data.email)
+    existing_user = get_user_by_login(db, data.login)
 
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists",
+            detail="User with this login already exists",
         )
 
     school = db.query(School).filter(School.id == data.school_id).first()
@@ -37,12 +37,12 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=Token)
 def login(data: UserLogin, db: Session = Depends(get_db)):
-    user = authenticate_user(db, data.email, data.password)
+    user = authenticate_user(db, data.login, data.password)
 
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail="Incorrect login or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
     if user.is_blocked:

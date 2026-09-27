@@ -13,9 +13,17 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from xml.sax.saxutils import escape
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    LongTable,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 PDF_FONT_REGULAR = "DejaVuSans"
@@ -84,6 +92,162 @@ def get_behavior_class_report_data(db, current_user, data):
         "total": len(items),
         "items": items,
     }
+
+
+def get_student_behavior_statistics(db, student: Student) -> dict:
+    records = (
+        db.query(BehaviorRecord)
+        .filter(
+            BehaviorRecord.student_id == student.id,
+            BehaviorRecord.school_id == student.school_id,
+        )
+        .order_by(BehaviorRecord.created_at.asc(), BehaviorRecord.id.asc())
+        .all()
+    )
+    return {
+        "student": {
+            "full_name": " ".join(
+                part
+                for part in (student.last_name, student.first_name, student.middle_name)
+                if part
+            ),
+            "class_name": f"{student.grade}{student.class_letter}",
+        },
+        "records": records,
+    }
+
+
+def build_student_statistics_excel(statistics: dict):
+    output = BytesIO()
+    workbook = Workbook()
+    details = workbook.active
+    details.title = "Все замечания"
+    details.append(["Ученик", statistics["student"]["full_name"]])
+    details.append(["Класс", statistics["student"]["class_name"]])
+    details.append([])
+    headers = ["Дата", "Предмет", "Причины", "Комментарий", "Фото"]
+    details.append(headers)
+    thin_side = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    for cell in details[4]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F4E78")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+    for record in reversed(statistics["records"]):
+        details.append(
+            [
+                record.created_at.strftime("%d.%m.%Y %H:%M"),
+                record.subject,
+                ", ".join(record.reasons or []),
+                record.comment or "",
+                record.photo_url or "",
+            ]
+        )
+        for cell in details[details.max_row]:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.border = border
+    for column, width in {"A": 20, "B": 24, "C": 48, "D": 48, "E": 42}.items():
+        details.column_dimensions[column].width = width
+    details.freeze_panes = "A5"
+    details.auto_filter.ref = f"A4:E{details.max_row}"
+    details.sheet_view.showGridLines = False
+
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def build_student_statistics_pdf(statistics: dict):
+    register_pdf_fonts()
+    output = BytesIO()
+    page_size = landscape(A4)
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=page_size,
+        rightMargin=12 * mm,
+        leftMargin=12 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title="Статистика ученика",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "StudentStatisticsTitle",
+        parent=styles["Title"],
+        fontName=PDF_FONT_BOLD,
+        fontSize=17,
+        leading=22,
+        alignment=0,
+        spaceAfter=5 * mm,
+    )
+    body_style = ParagraphStyle(
+        "StudentStatisticsBody",
+        parent=styles["Normal"],
+        fontName=PDF_FONT_REGULAR,
+        fontSize=9,
+        leading=12,
+    )
+    small_style = ParagraphStyle(
+        "StudentStatisticsSmall",
+        parent=body_style,
+        fontSize=7.5,
+        leading=9.5,
+    )
+    header_style = ParagraphStyle(
+        "StudentStatisticsHeader",
+        parent=body_style,
+        fontName=PDF_FONT_BOLD,
+        textColor=colors.white,
+    )
+    story = [
+        Paragraph("Все замечания", title_style),
+        Paragraph(
+            f"Ученик: {escape(str(statistics['student']['full_name']))}"
+            f" &nbsp;&nbsp; Класс: {escape(str(statistics['student']['class_name']))}",
+            body_style,
+        ),
+        Spacer(1, 3 * mm),
+    ]
+    headers = ["Дата", "Предмет", "Причины", "Комментарий", "Фото"]
+    detail_style = small_style
+    detail_rows = [[Paragraph(escape(header), header_style) for header in headers]]
+    for record in reversed(statistics["records"]):
+        detail_rows.append(
+            [
+                Paragraph(escape(record.created_at.strftime("%d.%m.%Y %H:%M")), detail_style),
+                Paragraph(escape(str(record.subject or "")), detail_style),
+                Paragraph(escape(", ".join(record.reasons or [])), detail_style),
+                Paragraph(escape(str(record.comment or "-")), detail_style),
+                Paragraph(escape(str(record.photo_url or "-")), detail_style),
+            ]
+        )
+    if not statistics["records"]:
+        detail_rows.append([Paragraph("Нет замечаний", body_style)] + [""] * 4)
+    story.append(
+        LongTable(
+            detail_rows,
+            colWidths=[28 * mm, 38 * mm, 58 * mm, 75 * mm, 60 * mm],
+            repeatRows=1,
+            hAlign="LEFT",
+            style=TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), PDF_FONT_BOLD),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7D0DA")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            ),
+        )
+    )
+    doc.build(story)
+    output.seek(0)
+    return output
 
 
 def build_behavior_excel(report_data):

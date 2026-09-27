@@ -163,9 +163,11 @@ async def add_behavior(
         payload = BehaviorCreate.model_validate(await request.json())
         photo_url = payload.photo_url
 
-    if current_user.role == "teacher" and not (
-        class_teacher_can_access_student(current_user, student)
-        or teacher_can_create_subject(db, current_user, student, payload.subject)
+    if current_user.role == "teacher" and not teacher_can_create_subject(
+        db,
+        current_user,
+        student,
+        payload.subject,
     ):
         raise HTTPException(
             status_code=403,

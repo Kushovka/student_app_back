@@ -12,6 +12,7 @@ from app.models.user import User
 from app.schemas.auth import (
     SchoolAdminCreate,
     SchoolUserCreate,
+    UserNameUpdate,
     UserBlockUpdate,
     UserOut,
     UserRoleUpdate,
@@ -382,6 +383,33 @@ def update_user_role(
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.patch("/{user_id}/name", response_model=UserOut)
+def update_user_name(
+    user_id: str,
+    data: UserNameUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    teacher = get_school_user_or_404(db, current_user, user_id)
+    if teacher.role == "admin" and current_user.role != "superadmin":
+        raise HTTPException(status_code=403, detail="Only superadmin can edit school administrators")
+    if teacher.role not in {"teacher", "admin"}:
+        raise HTTPException(status_code=400, detail="Only teachers and administrators can be edited")
+
+    first_name = data.first_name.strip()
+    last_name = data.last_name.strip()
+    if not first_name or not last_name:
+        raise HTTPException(status_code=400, detail="First name and last name are required")
+
+    teacher.first_name = first_name
+    teacher.last_name = last_name
+    teacher.middle_name = data.middle_name.strip()
+    db.commit()
+    db.refresh(teacher)
+    return get_school_user_or_404(db, current_user, teacher.id)
 
 
 @router.patch("/{user_id}/block", response_model=UserOut)

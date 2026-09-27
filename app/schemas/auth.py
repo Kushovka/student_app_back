@@ -61,6 +61,12 @@ class UserBlockUpdate(BaseModel):
     is_blocked: bool
 
 
+class UserNameUpdate(BaseModel):
+    first_name: str
+    last_name: str
+    middle_name: str = ""
+
+
 class SchoolAdminCreate(BaseModel):
     first_name: str
     last_name: str

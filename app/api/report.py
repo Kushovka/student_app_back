@@ -9,7 +9,10 @@ from app.services.report_service import (
     build_behavior_excel,
     build_behavior_docx,
     build_behavior_pdf,
+    build_student_statistics_excel,
+    build_student_statistics_pdf,
     get_behavior_class_report_data,
+    get_student_behavior_statistics,
 )
 
 from app.api.deps import get_current_user
@@ -193,6 +196,47 @@ def export_behavior_class_report(
         )
 
     return report_data
+
+
+@router.get("/students/{student_id}/statistics/export")
+def export_student_behavior_statistics(
+    student_id: str,
+    format: Literal["xlsx", "pdf"] = Query(default="xlsx"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != "teacher" or not current_user.is_class_teacher:
+        raise HTTPException(status_code=403, detail="Class teacher access required")
+    if not current_user.school_id:
+        raise HTTPException(status_code=403, detail="User is not linked to a school")
+
+    student = (
+        db.query(Student)
+        .filter(
+            Student.id == student_id,
+            Student.school_id == current_user.school_id,
+            Student.grade == current_user.homeroom_grade,
+            Student.class_letter == current_user.homeroom_class_letter,
+        )
+        .first()
+    )
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    statistics = get_student_behavior_statistics(db, student)
+    if format == "pdf":
+        output = build_student_statistics_pdf(statistics)
+        filename = f"student_statistics_{student.id}.pdf"
+        media_type = "application/pdf"
+    else:
+        output = build_student_statistics_excel(statistics)
+        filename = f"student_statistics_{student.id}.xlsx"
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return StreamingResponse(
+        output,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/dashboard")
